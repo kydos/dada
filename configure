@@ -1,0 +1,16 @@
+#!/bin/bash
+
+mkdir ./lib &>/dev/null
+mkdir ./src/main/java &>/dev/null
+cp $OSPL_HOME/jar/dcpssaj.jar ./lib
+pushd $PWD &>/dev/null
+cd src/main/java
+echo "Compiling IDL files..."
+find ../resources/ -name "*.idl" -exec idlpp -S -l java {} \;
+popd &>/dev/null
+
+echo "Now you should do:"
+echo "\$ sbt compile"
+echo ""
+echo "have fun with dada."
+echo ""

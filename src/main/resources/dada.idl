@@ -1,0 +1,61 @@
+module dada { module detail {
+
+struct TLogicalClock {
+    long ts;
+    long mid;
+};
+#pragma keylist TLogicalClock mid
+
+enum TMemberStatus {
+    JOINED,
+    LEAVED,
+    FAILED,
+    SUSPECTED
+};
+
+struct TMemberInfo {
+    long mid; // member-id
+    TMemberStatus status;
+};
+#pragma keylist TMemberInfo mid
+
+struct TAck {
+    long amid; // acknowledged member-id
+    TLogicalClock ts;
+};
+#pragma keylist TAck ts.mid
+
+
+
+// QueueElement defines the type associated with an ADA Eventual Queue.
+// Notice that this type does not define a key as we do not care about having
+// multiple streams for independent writers.
+typedef sequence<octet> TData;
+struct TQueueElement {
+    TLogicalClock ts;
+    TData        data;
+};
+#pragma keylist TQueueElement
+
+
+enum TCommandKind {
+    DEQUEUE,
+    ACK,
+    POP
+};
+
+struct TQueueCommand {
+    TCommandKind kind;
+    long mid;
+    TLogicalClock ts;
+};
+#pragma keylist TQueueCommand
+/*
+This is simply sending a TS
+struct TDequeRequest {
+    long mid;
+    TlogicalClock reqTs;
+};
+*/
+
+}; };
