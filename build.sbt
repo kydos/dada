@@ -17,7 +17,7 @@ libraryDependencies += "org.slf4j" % "slf4j-api" % "1.6.4"
 
 libraryDependencies += "org.slf4j" % "slf4j-nop" % "1.6.4"
 
-//libraryDependencies += "ch.qos.logback" % "logback-classic" % "1.0.1"
+libraryDependencies += "ch.qos.logback" % "logback-classic" % "1.0.1"
 
 libraryDependencies += "net.icorsaro" % "escalier_2.9.2" % "0.4.2"
 

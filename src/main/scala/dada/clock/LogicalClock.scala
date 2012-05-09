@@ -28,11 +28,11 @@ object LogicalClock {
  * @author <a href="mailto:sara@icorsaro.net">Sara Tucci</a>
 
  */
-case class LogicalClock(ts: Int, id: Int) extends Ordered[LogicalClock] {
+case class LogicalClock(ts: Long, id: Int) extends Ordered[LogicalClock] {
 
   def compare(that: LogicalClock) = {
     val s1 = (this.ts - that.ts)
-    if (s1 != 0) s1
+    if (s1 != 0) s1.toInt
     else (this.id - that.id)
   }
 

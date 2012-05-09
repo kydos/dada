@@ -1,7 +1,7 @@
 module dada { module detail {
 
 struct TLogicalClock {
-    long ts;
+    long long ts;
     long mid;
 };
 #pragma keylist TLogicalClock mid
@@ -50,6 +50,15 @@ struct TQueueCommand {
     TLogicalClock ts;
 };
 #pragma keylist TQueueCommand
+
+// Eventual Leader Votes
+struct TEventualLeaderVote {
+    long long epoch;
+    long mid;
+    long lid; // leader id
+};
+#pragma keylist TEventualLeaderVote mid
+
 /*
 This is simply sending a TS
 struct TDequeRequest {
@@ -57,5 +66,17 @@ struct TDequeRequest {
     TlogicalClock reqTs;
 };
 */
+
+// Generic Protocol Message Holder.
+// This topic type is used to hold Scala Case Classes
+// that are then used to activate protocol transitions.
+// This is particularly useful for implementing PAXOS as
+// it makes it simpler to work under a Reliable+FIFO channels
+// assumptions. This will allow us to make a few shortcuts on the
+// protocol to make it simpler/faster.
+struct TProtocolMessage {
+    TData data;
+};
+
 
 }; };

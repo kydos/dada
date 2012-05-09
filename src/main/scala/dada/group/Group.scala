@@ -76,6 +76,19 @@ abstract class Group {
   def waitForViewSize(n: Int, timeout: Int)
 
   /**
+   * Returns the current leader, if any elected yet
+   * @return the current leader, or None if one has not been elected yet.
+   */
+  def leader: Option[Int]
+
+  /**
+   * Proposes a member as eventual leader.
+   * @param mid the member id that is making the proposal
+   * @param lid the member proposed as leader
+   */
+  def proposeLeader(mid: Int, lid: Int)
+
+  /**
    * Reactions attached to this group.
    */
   val reactions = new Reactions.Impl
