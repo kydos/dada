@@ -16,7 +16,7 @@ object EventualLeaderElection {
 
     group.join(mid)
 
-    group.reactions += {
+    group listen {
       case EpochChange(e) => {
         println(">> Epoch Changed to  "+ e)
         val lid = group.view.min

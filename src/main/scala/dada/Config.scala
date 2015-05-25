@@ -9,4 +9,6 @@ object Config {
   type MutexType = mutex.LCMutex
   type QueueType[T] = queue.LCEventualQueue[T]
   type EnqueueType[T] = queue.LCEventualEnqueue[T]
+  type GroupType = group.EventualGroup
+  val GroupTypeCompanion = group.EventualGroup
 }

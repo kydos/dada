@@ -22,20 +22,20 @@ object GroupMember {
       group.view foreach(m => print(m + " "))
       println("}")}
 
-    group.reactions += {
-      case MemberFailure(mid) => {
-        println("Member "+ mid + " Failed.")
+    group listen {
+      case MemberFailure(id) => {
+        println("Member "+ id + " Failed.")
         printGroupView()
       }
-      case MemberJoin(mid) => {
-        println("Member "+ mid + " Joined")
+      case MemberJoin(id) => {
+        println("Member "+ id + " Joined")
         printGroupView()
       }
-      case MemberLeave(mid) => {
-        println("Member "+ mid +" Left")
+      case MemberLeave(id) => {
+        println("Member "+ id +" Left")
         printGroupView()
       }
     }
-
+  Thread.currentThread().join()
   }
 }

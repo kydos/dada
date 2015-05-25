@@ -4,46 +4,55 @@ import dada.detail.{TAck, TLogicalClock}
 import dada.clock.LogicalClock
 import dada.Config._
 
-import dds.pub.{Publisher, DataWriter}
-import dds.{DomainParticipant, Topic}
-import dds.sub.{DataReader, Subscriber}
-import dds.qos._
-import dds.event._
-
-import collection.mutable.{SynchronizedPriorityQueue, Map}
+import dds._
+import dds.config.DefaultEntities.{defaultDomainParticipant, defaultPolicyFactory}
+import dds.prelude._
 import java.util.concurrent.Semaphore
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
+import java.util.concurrent.atomic.{AtomicReference, AtomicLong}
 import dada.group.Group
-import dada.group.event.MemberFailure
+import dada.concurrent.synchronisers._
+import scala.collection.JavaConversions._
+import dada.clock.LogicalClock._
 
 object LCMutex {
-  val mutexRequestTopic = Topic[TLogicalClock]("MutexRequest");
-  val mutexAckTopic = Topic[TAck]("MutexAck");
-  private val subMap = Map[Int, Subscriber]()
-  private val pubMap = Map[Int, Publisher]()
-  val drQos = DataReaderQos() + History.KeepAll + Reliability.Reliable
-  val dwQos = DataWriterQos() + History.KeepAll + Reliability.Reliable
+  val mutexRequestTopic = Topic[TLogicalClock]("MutexRequest")
+  val mutexAckTopic = Topic[TAck]("MutexAck")
+  private var subMap = Map[Int, org.omg.dds.sub.Subscriber]()
+  private var pubMap = Map[Int, org.omg.dds.pub.Publisher]()
+
+  import dds.config.DefaultEntities.{defaultPub, defaultSub}
+  val drQos = DataReaderQos().withPolicies(
+    History.KeepAll,
+    Reliability.Reliable
+  )
+  val dwQos = DataWriterQos().withPolicies(
+    History.KeepAll,
+    Reliability.Reliable
+  )
 
 
-  def groupPublisher(gid: Int): Publisher =
-    pubMap.getOrElse (gid,  {
-      val qos = PublisherQos(gid.toString)
-      val pub = Publisher(mutexRequestTopic.dp, qos)
-      pubMap += (gid -> pub)
+  def groupPublisher(gid: Int): org.omg.dds.pub.Publisher = synchronized {
+    pubMap.getOrElse(gid, {
+      val qos = PublisherQos().withPolicy(
+        Partition(gid.toString)
+      )
+      val pub = Publisher(mutexRequestTopic.getParent(), qos)
+      pubMap = pubMap + (gid -> pub)
       pub
     })
-
-
-  def groupSubscriber(gid: Int): Subscriber = {
-    synchronized {
-      subMap getOrElse(gid, {
-        val qos = SubscriberQos(gid.toString)
-        val sub = Subscriber(mutexRequestTopic.dp, qos)
-        subMap += (gid -> sub)
-        sub
-      })
-    }
   }
+
+  def groupSubscriber(gid: Int): org.omg.dds.sub.Subscriber = synchronized {
+    subMap getOrElse(gid, {
+      val qos = SubscriberQos().withPolicy(
+        Partition(gid.toString)
+      )
+      val sub = Subscriber(mutexRequestTopic.getParent(), qos)
+      subMap = subMap + (gid -> sub)
+      sub
+    })
+  }
+
 }
 /**
  * This is a distributed Mutex implemented levaraging Lamports logical clock algorithm.
@@ -62,17 +71,16 @@ object LCMutex {
  *
  * @version 0.1
  *
- * @param n the numbers of process on the group
+ * @param mid the member id
  * @param gid the group id associated with this mutex
  */
-import dada.clock.LogicalClock._
 class LCMutex(val mid: Int, val gid: Int)(implicit val logger: Logger) extends Mutex {
 
-  private var group = Group(gid)
-  private var ts = LogicalClock(0, mid)
-  private var receivedAcks = new AtomicLong(0)
+  private val group = Group(gid)
+  private val tsRef = new AtomicReference[LogicalClock](LogicalClock(0, mid))
+  private val receivedAcks = new AtomicLong(0)
 
-  private var pendingRequests = new SynchronizedPriorityQueue[LogicalClock]()
+  private val pendingRequestsRef = new AtomicReference[List[LogicalClock]](List[LogicalClock]())
   private var myRequest =  LogicalClock.Infinite
 
   private val reqDW = DataWriter[TLogicalClock](LCMutex.groupPublisher(gid), LCMutex.mutexRequestTopic, LCMutex.dwQos)
@@ -82,18 +90,20 @@ class LCMutex(val mid: Int, val gid: Int)(implicit val logger: Logger) extends M
   private val ackDR = DataReader[TAck](LCMutex.groupSubscriber(gid), LCMutex.mutexAckTopic, LCMutex.drQos)
   private val ackSemaphore = new Semaphore(0)
 
-  ackDR.reactions += {
+
+  ackDR listen {
     case DataAvailable(dr) => {
       // Count only the ACK for us
-      val acks = ((ackDR take) filter (_.amid == mid))
+      val acks = ackDR.take.toList filter (s => s.getData != null && s.getData.amid == mid)
       val k = acks.length
 
-      if (k > 0) {
+      if (acks.nonEmpty) {
         // Set the local clock to the max (tsi, tsj) + 1
-        synchronized {
-          val maxTs = math.max(ts.ts, (acks map (_.ts.ts)).max) + 1
-          ts = LogicalClock(maxTs, ts.id)
+        compareAndSet(tsRef) {ts =>
+          val maxTs = math.max(ts.ts, (acks map (_.getData.ts.ts)).max) + 1
+          LogicalClock(maxTs, ts.id)
         }
+
         val ra = receivedAcks.addAndGet(k)
         val groupSize = group.size
         logger.trace(Console.BLUE +"M" + mid + " received " + ra +" Acks" + Console.RESET)
@@ -107,32 +117,38 @@ class LCMutex(val mid: Int, val gid: Int)(implicit val logger: Logger) extends M
     }
   }
 
-  reqDR.reactions += {
+  reqDR listen{
     case DataAvailable(dr) => {
-      val requests = (reqDR take) filterNot (_.mid == mid)
 
-      if (requests.isEmpty == false ) {
-        synchronized {
-          val maxTs = math.max((requests map (_.ts)).max, ts.ts) + 1
-          ts = LogicalClock(maxTs, ts.id)
+      val requests = reqDR.take.toList
+        .filter(_.getData != null)
+        .map (_.getData)
+        .filterNot(_.mid == mid)
+
+      if (requests.nonEmpty) {
+        compareAndSet(tsRef) {ts =>
+          val maxTs = math.max(ts.ts, (requests map (_.ts)).max) + 1
+          LogicalClock(maxTs, ts.id)
         }
+
         requests foreach (r => {
           if (r < myRequest) {
-            ts = ts inc()
-            val ack = new TAck(r.mid, ts)
-            logger.trace(Console.GREEN +"M."+mid + "  sending ACKs = P"+r.mid +" wiht  TS = " + ts + Console.RESET)
-            ackDW ! ack
+            compareAndSet(tsRef) { ts => ts inc() }
+            val ack = new TAck(r.mid, tsRef.get)
+            logger.trace(Console.GREEN +"M."+mid + "  sending ACKs = P"+r.mid +" wiht  TS = " + tsRef.get + Console.RESET)
+            ackDW write ack
             None
           }
-          else {
-            (pendingRequests find (_ == r)).getOrElse({
-              pendingRequests.enqueue(r)
-              r})
-          }
+          else
+          // We need atomicity here to avoid loosing requests
+            compareAndSet(pendingRequestsRef) { pendingRequests =>
+             if (pendingRequests.contains(r)) pendingRequests else (r :: pendingRequests)
+            }
+
         })
         logger.trace(Console.YELLOW + "-----------------------------------" + Console.RESET)
         logger.trace(Console.YELLOW + "[M."+ mid +"]: Un-Acked Requests Queue" + Console.RESET)
-        pendingRequests foreach (r => logger.trace(r.toString))
+        pendingRequestsRef.get foreach (r => logger.trace(r.toString))
         logger.trace(Console.YELLOW + "-----------------------------------" + Console.RESET)
         logger.trace(Console.RED + "[M."+ mid +"]: MUTEX onReq Exit" + Console.RESET)
       }
@@ -140,10 +156,11 @@ class LCMutex(val mid: Int, val gid: Int)(implicit val logger: Logger) extends M
   }
 
   def acquire() {
-    ts = ts.inc()
-    myRequest = ts
+    compareAndSet(tsRef) { ts => ts.inc() }
+
+    myRequest = tsRef.get()
     logger.trace(Console.RED + "[M."+ mid +"]: ACQUIRE REQ with ts = " + myRequest + Console.RESET)
-    reqDW ! myRequest
+    reqDW write myRequest
 
     // Try to acquire the semaphore and re-issue a request if timeout
     // The assumption is that the system stabilize within the timeout
@@ -157,10 +174,13 @@ class LCMutex(val mid: Int, val gid: Int)(implicit val logger: Logger) extends M
   def release() {
     logger.trace(Console.GREEN + "[M."+ mid +"]: Mutex RELEASE" + Console.RESET)
     myRequest = LogicalClock.Infinite
-    (pendingRequests dequeueAll) foreach { req =>
-      ts = ts inc()
-      logger.trace(Console.GREEN +"M."+mid + "  sending ACKs = M."+req.id+" wiht  TS = " + ts + Console.RESET)
-      ackDW ! new TAck(req.id, ts)
-    }
+
+    // The Mutex is single threaded, thus non need to be atomic.
+    val pendingRequests = pendingRequestsRef.get
+      pendingRequests.foreach { req =>
+        logger.trace(Console.GREEN + "M." + mid + "  sending ACKs = M." + req.id + " wiht  TS = " + tsRef.get + Console.RESET)
+        ackDW write (new TAck(req.id, tsRef.get))
+      }
+      pendingRequestsRef.set(List())
   }
 }

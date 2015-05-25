@@ -1,11 +1,11 @@
 #!/bin/bash
 
-mkdir ./lib &>/dev/null
 mkdir ./src/main/java &>/dev/null
 pushd $PWD &>/dev/null
 cd src/main/java
 echo "Compiling IDL files..."
-find ../resources/ -name "*.idl" -exec cafec {} \;
+find ../resources/ -name "*.idl" -exec idlpp -S -l java {} \;
+#find ../resources/ -name "*.idl" -exec cafec {} \;
 popd &>/dev/null
 
 echo "Now you should do:"

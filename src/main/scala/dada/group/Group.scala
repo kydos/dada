@@ -1,9 +1,9 @@
 package dada.group
 
-import swing.Reactions
-import scala.collection.mutable.Map
 import dada.Config._
-
+import java.util.concurrent.atomic.AtomicReference
+import dada.concurrent.synchronisers._
+import dada.event.Event
 
 object Group {
   private var groupMap = Map[Int, Group]()
@@ -11,26 +11,27 @@ object Group {
   def apply(gid: Int) = {
     synchronized {
       groupMap getOrElse (gid, {
-        val g = EventualGroup(gid)
-        groupMap += (gid -> g)
+        val g = GroupTypeCompanion(gid)
+        groupMap = groupMap + (gid -> g)
         g
       })
-
     }
   }
 
-  def groupPublisher(gid: Int)= EventualGroup.groupPublisher(gid)
+  def groupPublisher(gid: Int)= GroupTypeCompanion.groupPublisher(gid)
 
-  def groupSubscriber(gid: Int) = EventualGroup.groupSubscriber(gid)
+  def groupSubscriber(gid: Int) = GroupTypeCompanion.groupSubscriber(gid)
 }
 /**
- * This class provides a group abstractions that allows members to join and leave.
- * Different concrete implementations
+ * This class provides a group abstractions that allows members to
+ * join and leave.  Different concrete implementations
  *
  * @author <a href="mailto:angelo@icorsaro.net">Angelo Corsaro</a>
  * @author <a href="mailto:sara@icorsaro.net">Sara Tucci</a>
  */
 abstract class Group {
+
+  private val reactionsRef = new AtomicReference(Map[Int, PartialFunction[Event, Any]]())
 
   /**
    * Add the member with the specific member-id to this group.
@@ -89,7 +90,18 @@ abstract class Group {
   def proposeLeader(mid: Int, lid: Int)
 
   /**
-   * Reactions attached to this group.
+   * Attaches a partial function to react to certain events
    */
-  val reactions = new Reactions.Impl
+  def listen(fun: PartialFunction[Event, Any]): Int = {
+    val hash = fun.hashCode
+    compareAndSet(reactionsRef) { reactions =>  reactions + (hash -> fun)  }
+    hash
+  }
+
+  def deaf(hash: Int): Unit = compareAndSet(reactionsRef) { reactions => reactions - hash }
+
+  protected def react(e: Event): Unit = {
+    val reactions = reactionsRef.get
+    reactions.foreach(f => if (f._2.isDefinedAt(e)) f._2(e))
+  }
 }

@@ -1,29 +1,46 @@
 package dada.queue
 
 import dada.detail._
-import dds.Topic
 import dada.group.Group
 import dada.clock.LogicalClock
-import dds.event.DataAvailable
 import java.io.{ObjectInputStream, ObjectOutputStream, ByteArrayInputStream, ByteArrayOutputStream}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 import java.util.concurrent.Semaphore
 import dada.Config
-import collection.mutable.{PriorityQueue, SynchronizedPriorityQueue, Map}
-import dds.pub.{Publisher, DataWriter}
-import dds.sub.{Subscriber, DataReader}
 import dada.group.Group._
-import dds.qos._
 import dada.queue.LCEventualQueue._
 
+import dds._
+import dds.prelude._
+import dds.config.DefaultEntities.{defaultDomainParticipant, defaultPolicyFactory}
+
+import scala.collection.mutable
+import scala.collection.JavaConversions._
+import scala.languageFeature.postfixOps
+
+object LCEventualQueue {
+  val queueElemTopic = Topic[TQueueElement]("QueueElement")
+  val queueCommandTopic = Topic[TQueueCommand]("QueueCommand")
+  import dds.config.DefaultEntities.{defaultPub, defaultSub}
+  val dwQos = DataWriterQos().withPolicies (
+    Reliability.Reliable,
+    History.KeepAll
+  )
+  val drQos = DataReaderQos().withPolicies (
+    Reliability.Reliable,
+    History.KeepAll
+  )
+
+}
 
 class LCEventualEnqueue[T](val qname: String,
-                              val mid: Int,
-                              val gid: Int)
-                             (implicit logger: Config.Logger)
+                           val mid: Int,
+                           val gid: Int)
+                          (implicit logger: Config.Logger)
   extends Enqueue[T] {
 
-  protected val pub = Publisher(groupPublisher(gid).dp, PublisherQos(gid.toString + qname))
+  protected val pub = Publisher(groupPublisher(gid).getParent, PublisherQos().withPolicy(Partition(gid.toString + qname)))
+
   protected val elemDW = DataWriter[TQueueElement](pub, queueElemTopic, dwQos)
   protected var ts = LogicalClock(0, mid)
 
@@ -37,21 +54,13 @@ class LCEventualEnqueue[T](val qname: String,
       ts = ts inc()
     }
     logger.trace(Console.BLUE+"ENQUEUE_S = {}"+ Console.RESET, ts)
-    elemDW ! elem
+    elemDW write elem
 
     oos.close()
     baos.close()
   }
 }
 
-object LCEventualQueue {
-  val queueElemTopic = Topic[TQueueElement]("QueueElement")
-  val queueCommandTopic = Topic[TQueueCommand]("QueueCommand")
-
-  val dwQos = DataWriterQos() + Reliability.Reliable + History.KeepAll
-  val drQos = DataReaderQos() + Reliability.Reliable + History.KeepAll
-
-}
 
 /**
  * This class provides an "Eventual" Distributed Queue abstraction implemented
@@ -81,7 +90,7 @@ class LCEventualQueue[T](qname: String,
   import LogicalClock._
 
 
-  private val sub = Subscriber(groupPublisher(gid).dp, SubscriberQos(gid.toString + qname))
+  private val sub = Subscriber(groupPublisher(gid).getParent, SubscriberQos().withPolicy(Partition(gid.toString + qname)))
 
   private val elemDR = DataReader[TQueueElement](sub, queueElemTopic, drQos)
 
@@ -95,8 +104,8 @@ class LCEventualQueue[T](qname: String,
   private val elemRevOrd = new Ordering[TQueueElement] {
     def compare(x: TQueueElement, y: TQueueElement) = - x.ts.compare(y.ts)
   }
-  private var elems = new PriorityQueue[TQueueElement]()(elemRevOrd)
-  private val requests = new SynchronizedPriorityQueue[LogicalClock]()(lcRevOrd)
+  private var elems = new mutable.PriorityQueue[TQueueElement]()(elemRevOrd)
+  private val requests = new mutable.SynchronizedPriorityQueue[LogicalClock]()(lcRevOrd)
 
   private var myRequest = LogicalClock.Infinite
 
@@ -113,11 +122,13 @@ class LCEventualQueue[T](qname: String,
   private def cmd2Str(cmd: TQueueCommand) =
     "("+ cmd.kind.value + ", "+cmd.mid+", <"+ cmd.ts.ts +", "+cmd.ts.mid+">)"
 
-  elemDR.reactions += {
+  elemDR listen{
     case DataAvailable(_) => {
       logger.trace(Console.BLUE + "LCEventualQueue:elemDR.reactions - DataAvailable" + Console.RESET)
       synchronized {
-        (elemDR take) foreach (elems.enqueue(_))
+        elemDR.take().toList
+          .filter(_.getData != null)
+          .foreach (s => elems.enqueue(s.getData))
       }
       if (synchDequeue.get()) {
         logger.trace(Console.BLUE + "LCEventualQueue:elemDR.reactions - Releasing <sdqueue>" + Console.RESET)
@@ -126,9 +137,10 @@ class LCEventualQueue[T](qname: String,
     }
   }
 
-  qcmdDR.reactions += {
+  qcmdDR listen {
     case DataAvailable(_) => {
-      (qcmdDR take) foreach { cmd =>
+      qcmdDR.take().toList
+        .filter(_.getData != null).map(_.getData).foreach { cmd =>
         cmd.kind match {
 
           case TCommandKind.DEQUEUE if (cmd.mid != mid) => {

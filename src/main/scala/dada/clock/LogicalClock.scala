@@ -1,7 +1,7 @@
 package dada.clock
 
 import dada.detail.TLogicalClock
-
+import scala.language.implicitConversions
 /**
  * Lamport Style Logical Clock.
  *
@@ -10,8 +10,8 @@ import dada.detail.TLogicalClock
  */
 
 object LogicalClock {
-  implicit def clock2TClock(clock: LogicalClock) = new TLogicalClock(clock.ts, clock.id)
-  implicit def TClock2Clock(clock: TLogicalClock) = new LogicalClock(clock.ts, clock.mid)
+  implicit def clock2TClock(clock: LogicalClock): TLogicalClock = new TLogicalClock(clock.ts, clock.id)
+  implicit def TClock2Clock(clock: TLogicalClock): LogicalClock = new LogicalClock(clock.ts, clock.mid)
 
   val Infinite = new LogicalClock(Int.MaxValue, Int.MaxValue)
 }
@@ -31,9 +31,9 @@ object LogicalClock {
 case class LogicalClock(ts: Long, id: Int) extends Ordered[LogicalClock] {
 
   def compare(that: LogicalClock) = {
-    val s1 = (this.ts - that.ts)
+    val s1 = this.ts - that.ts
     if (s1 != 0) s1.toInt
-    else (this.id - that.id)
+    else this.id - that.id
   }
 
   /**

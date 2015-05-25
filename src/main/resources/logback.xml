@@ -15,5 +15,12 @@
   <root level="trace">          
     <appender-ref ref="STDOUT" />
   </root>  
-  
+
+  <logger name="cafe.ddsi.disc"     level="${log.level:-INFO}"/>
+  <logger name="cafe.ddsi"          level="${log.level:-INFO}"/>
+  <logger name="cafe.ddsi.config"   level="${log.level:-INFO}"/>
+  <logger name="cafe.ddsi.net"      level="${log.level:-INFO}"/>
+  <logger name="cafe.ddsi.disc"     level="${log.level:-INFO}"/>
+  <logger name="cafe.ddsi.entities" level="${log.level:-INFO}"/>
+
 </configuration>

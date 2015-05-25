@@ -1,18 +1,20 @@
 package dada.group
 
-import dds.Topic
-import dds.pub._
-import dds.sub._
-
-import dds.qos._
+import dds._
+import dds.config.DefaultEntities.{defaultDomainParticipant, defaultPolicyFactory}
+import dds.prelude._
 import dada.detail._
 import event._
-import dds.event.{DataAvailable, LivelinessChanged}
-import util.logging.Logged
 import dada.Config._
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.{TimeUnit, Semaphore}
+import org.omg.dds.sub.ViewState
+
 import collection.mutable.{HashMap, Map}
+import java.util.concurrent.atomic.AtomicReference
+import dada.concurrent.synchronisers._
+import scala.language.postfixOps
+import data.util._
 
 /**
  * This class implement an group with an eventually consistent view.
@@ -22,47 +24,58 @@ import collection.mutable.{HashMap, Map}
 object EventualGroup {
   def groupTopic = Topic[TMemberInfo]("MemberInfo")
   def electionTopic = Topic[TEventualLeaderVote]("EventualLeaderVote")
-  private val subMap = Map[Int, Subscriber]()
-  private val pubMap = Map[Int, Publisher]()
-  private val groupMap = Map[Int, EventualGroup]()
+  private var subMap = Map[Int, org.omg.dds.sub.Subscriber]()
+  private var pubMap = Map[Int, org.omg.dds.pub.Publisher]()
+  private var groupMap = Map[Int, EventualGroup]()
 
 
-  def apply(gid: Int): EventualGroup =  {
-
+  def apply(gid: Int): EventualGroup =  synchronized {
     groupMap.getOrElse(gid, {
       val g = new EventualGroup(gid)
-      groupMap += (gid -> g)
-      g
+      groupMap = groupMap + (gid -> g)
+        g
     })
   }
 
-  def groupPublisher(gid: Int): Publisher = {
+
+  def groupPublisher(gid: Int): org.omg.dds.pub.Publisher = synchronized {
     val pub = pubMap.getOrElse(gid, {
-      val p: Publisher = Publisher(groupTopic.dp, PublisherQos(gid.toString))
-      pubMap += (gid -> p)
+      val pubQos = PublisherQos().withPolicy(Partition(gid.toString))
+      val p: org.omg.dds.pub.Publisher = Publisher(groupTopic.getParent, pubQos)
+      pubMap = pubMap + (gid -> p)
       p
     })
     pub
   }
 
-  def groupSubscriber(gid: Int): Subscriber = {
+  def groupSubscriber(gid: Int): org.omg.dds.sub.Subscriber = synchronized {
     subMap.getOrElse(gid, {
-      val s = Subscriber(groupTopic.dp, SubscriberQos(gid.toString))
+      val subQos = SubscriberQos().withPolicy(Partition(gid.toString))
+      val s = Subscriber(groupTopic.getParent, subQos)
       subMap += (gid -> s)
       s
     })
   }
 
-  val drQos = DataReaderQos() + History.KeepLast(1) + Reliability.Reliable + Durability.TransientLocal
-  val dwQos = DataWriterQos() + History.KeepLast(1) + Reliability.Reliable + Durability.TransientLocal
+  import dds.config.DefaultEntities.{defaultPub, defaultSub}
+  val drQos = DataReaderQos().withPolicies(
+    History.KeepLast(1),
+    Reliability.Reliable,
+    Durability.TransientLocal
+  )
+  val dwQos = DataWriterQos().withPolicies(
+    History.KeepLast(1),
+    Reliability.Reliable,
+    Durability.TransientLocal
+  )
 }
 
 
 
 class EventualGroup private (val gid: Int)(implicit Logger: dada.Config.Logger) extends Group {
-  private var members = List[(Int, Long)]()
-  private val leadersScore = HashMap[Int, Int]()
-  private val membersVote = HashMap[Int, Int]()
+  private val membersRef = new AtomicReference(List[TMemberInfo]())
+  private val leadersScore = Map[Int, Int]()
+  private val membersVote = Map[Int, Int]()
   private var epoch = new AtomicLong(0)
 
   import EventualGroup._
@@ -78,81 +91,86 @@ class EventualGroup private (val gid: Int)(implicit Logger: dada.Config.Logger) 
   private val aliveCount = new AtomicLong(1)
 
   private var currentLeader: Option[Int] = None
+  import scala.collection.JavaConversions._
+  import org.omg.dds.sub.{InstanceState, SampleState}
 
-  memberDR.reactions += {
-    case DataAvailable(dr) => {
+  memberDR listen  {
+    case DataAvailable(_) => {
       Logger.debug("onDataAvailable")
-      val samples = memberDR take(SampleSelector.AllSamples)
-      val zipped = samples.data zip samples.info
+      val anySample = memberDR.getParent.createDataState()
+        .withAnyInstanceState()
+        .withAnySampleState()
+        .withAnyViewState()
 
-      val joined = zipped filter (z => {
-        (z._2.valid_data &&
-          z._1.status == TMemberStatus.JOINED &&
-          z._2.instance_state == DDS.ALIVE_INSTANCE_STATE.value &&
-          z._2.sample_state == DDS.NOT_READ_SAMPLE_STATE.value)}) map (z => (z._1.mid, z._2.publication_handle))
+      val samples = memberDR
+        .select()
+          .dataState(anySample)
+        .read().toList
 
-      val left = zipped filter(z => {
-        (z._2.sample_state == DDS.NOT_READ_SAMPLE_STATE.value &&
-          z._2.instance_state == DDS.ALIVE_INSTANCE_STATE.value &&
-          z._1.status == TMemberStatus.LEAVED)}) map (z => (z._1.mid, z._2.publication_handle))
+      Logger.debug(samples.foldLeft("\n")((xs, x) => xs + show(x) + "\n"))
 
-      synchronized {
-        members = (members filterNot(left contains)) ::: joined.toList
-      }
+      val joined = samples.filter { z =>
+        (z.getData != null
+          && z.getData.status.value == TMemberStatus.JOINED.value
+          && z.getInstanceState.value == InstanceState.ALIVE.value
+          && z.getSampleState.value == SampleState.NOT_READ.value)
+      } map(_.getData)
+
+      val left = samples.filter { z =>
+        (z.getData.status.value == TMemberStatus.LEAVED.value
+        && z.getInstanceState.value != InstanceState.ALIVE.value)
+      } map(_.getData)
+
+      val failed = samples.filter { z =>
+        z.getInstanceState.value != InstanceState.ALIVE.value
+      } map (_.getData)
+
+      // Clean-up disposed samples from the cache
+      val disposedSamples = memberDR.getParent.createDataState()
+        .`with`(InstanceState.NOT_ALIVE_DISPOSED).`with`(InstanceState.NOT_ALIVE_NO_WRITERS)
+        .`with`(SampleState.READ).`with`(SampleState.READ)
+        .`with`(ViewState.NEW).`with`(ViewState.NOT_NEW)
+
+      memberDR
+        .select()
+        .dataState(disposedSamples)
+        .take().toList
+
+
+
+      compareAndSet(membersRef) { members => members.filterNot(x => left.map(_.mid).contains(x.mid) || failed.map(_.mid).contains(x.mid)) ::: joined}
+
 
       // There is a new view, thus we notify those that are waiting for it to have a look
       Logger.debug("Releasing View Semaphore. New view size = "+ this.size)
       semaphore.release()
 
       joined foreach(m => {
-        reactions(new MemberJoin(m._1))
-        reactions (new EpochChange(epoch.incrementAndGet()))
+        react(new MemberJoin(m.mid))
+        react(new EpochChange(epoch.incrementAndGet()))
       })
+
       left foreach(m => {
-        reactions(new MemberLeave(m._1))
-        reactions (new EpochChange(epoch.incrementAndGet()))
+        react(new MemberLeave(m.mid))
+        react(new EpochChange(epoch.incrementAndGet()))
       })
-    }
 
-    case LivelinessChanged(_, lc) => {
-      Logger.debug("Enter onLivelinessChanged")
-      val ac = lc.alive_count
-      if (ac < aliveCount.getAndSet(ac)) {
-        val sm = members find (_._2 == lc.last_publication_handle)
-        sm map(m => {
-          synchronized {
-            members = members filterNot (_ == m)
-            Logger.debug("--- Updated Members View ---")
-            members.foreach (m => Logger.debug(m.toString))
-            Logger.debug("--- * ---")
-          }
-          semaphore.release()
-          val fm = m._1
-          reactions(new MemberFailure(fm))
-          membersVote.get(fm).map { v =>
-            leadersScore.get(v).map { s =>
-              leadersScore += (v -> (s - 1))
-              s
-            }
-            v
-          }
-          membersVote remove (fm)
-        })
-        reactions (new EpochChange(epoch.incrementAndGet()))
+      failed foreach { m =>
+        println("Failed Member: " + m.mid + " - " + m.status.value())
+        react (new MemberFailure((m.mid)))
+        react(new EpochChange(epoch.incrementAndGet()))
       }
-
-      Logger.debug("Exit onLivelinessChanged")
-
     }
   }
 
-  leaderDR.reactions += {
+  leaderDR.listen {
     case DataAvailable(_) => {
-      (leaderDR take) foreach (vote => {
+      (leaderDR take) foreach (sample => {
+        val vote = sample.getData
         Logger.debug("Received vote: ("+ vote.mid + ", "+ vote.lid +", "+ vote.epoch +")")
         if (vote.epoch > epoch.get()) {
           epoch.set(vote.epoch)
-          reactions (new EpochChange(epoch.get()))
+          react(new EpochChange(epoch.get()))
         }
         // record the vote
         val pvl = membersVote.get(vote.mid).getOrElse(-1)
@@ -173,7 +191,7 @@ class EventualGroup private (val gid: Int)(implicit Logger: dada.Config.Logger) 
         val pastLeader = currentLeader
         currentLeader = Some(l._1)
         if (currentLeader != pastLeader)
-          reactions (new NewLeader(currentLeader))
+          react(new NewLeader(currentLeader))
         l
       }
     }
@@ -187,16 +205,16 @@ class EventualGroup private (val gid: Int)(implicit Logger: dada.Config.Logger) 
     memberDW ! new TMemberInfo(mid, TMemberStatus.LEAVED)
   }
 
-  def size = members.length
+  def size = membersRef.get.length
 
-  def view = members map (_._1)
+  def view = membersRef.get.map (_.mid)
 
-  def waitForViewSize(n: Int) {
-    while (this.size != n) {
-      Logger.debug("Waiting for view to be established")
+  def waitForViewSize(n: Int): Unit = {
+    Logger.debug("Waiting for view to be established")
+    while (this.size != n)
       semaphore.acquire()
-      Logger.debug("View has been updated to "+ this.size)
-    }
+    Logger.debug("View has been updated to "+ this.size)
+
   }
 
   /**

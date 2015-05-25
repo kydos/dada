@@ -18,10 +18,12 @@ object MessageConsumer {
 
     println("Producer:> Joining Group")
     val group = Group(gid)
-    group.reactions += {
-      case MemberJoin(mid) => println("Joined M["+ mid +"]")
+    group listen{
+      case MemberJoin(id) => println("Joined M["+ id +"]")
     }
+
     group.join(mid)
+
     println("Producer:> Waiting for stable Group View")
     group.waitForViewSize(n)
 
